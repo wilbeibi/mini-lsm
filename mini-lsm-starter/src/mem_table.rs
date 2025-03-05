@@ -17,7 +17,7 @@
 
 use std::ops::Bound;
 use std::path::Path;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -52,8 +52,13 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 
 impl MemTable {
     /// Create a new mem-table.
-    pub fn create(_id: usize) -> Self {
-        unimplemented!()
+    pub fn create(id: usize) -> Self {
+        Self {
+            map: Arc::new(SkipMap::new()),
+            wal: None,
+            id,
+            approximate_size: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Create a new mem-table with WAL
@@ -83,8 +88,8 @@ impl MemTable {
     }
 
     /// Get a value by key.
-    pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.map.get(key).map(|entry| entry.value().clone())
     }
 
     /// Put a key-value pair into the mem-table.
@@ -92,8 +97,20 @@ impl MemTable {
     /// In week 1, day 1, simply put the key-value pair into the skipmap.
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        // Calculate the size of the key-value pair
+        let size_delta = key.len() + value.len();
+
+        // Insert into the skipmap
+        let key_bytes = Bytes::copy_from_slice(key);
+        let value_bytes = Bytes::copy_from_slice(value);
+        self.map.insert(key_bytes, value_bytes);
+
+        // Update the approximate size
+        self.approximate_size
+            .fetch_add(size_delta, Ordering::Relaxed);
+
+        Ok(())
     }
 
     /// Implement this in week 3, day 5.
@@ -110,7 +127,8 @@ impl MemTable {
 
     /// Get an iterator over a range of keys.
     pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+        // We'll implement this in Week 1 Day 2
+        unimplemented!("This will be implemented in Week 1 Day 2")
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -156,18 +174,18 @@ impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        unimplemented!("This will be implemented in Week 1 Day 2")
     }
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        unimplemented!("This will be implemented in Week 1 Day 2")
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        unimplemented!("This will be implemented in Week 1 Day 2")
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        unimplemented!("This will be implemented in Week 1 Day 2")
     }
 }

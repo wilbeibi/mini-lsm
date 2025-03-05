@@ -293,8 +293,35 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        // Get the current state with a read lock
+        let state = self.state.read();
+
+        // First try to get the key from the memtable
+        let result = state.memtable.get(key);
+
+        // If the key was found in the memtable
+        if let Some(value) = result {
+            // Check if it's a tombstone (empty value means the key was deleted)
+            if value.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(value));
+        }
+
+        // If not found in the memtable, try the immutable memtables from newest to oldest
+        for imm_memtable in &state.imm_memtables {
+            if let Some(value) = imm_memtable.get(key) {
+                // Check if it's a tombstone
+                if value.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(value));
+            }
+        }
+
+        // Key not found in any memtable
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -303,13 +330,42 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        // First check if we need to freeze the memtable
+        let need_freeze = {
+            let state = self.state.read();
+            state.memtable.approximate_size() >= self.options.target_sst_size
+                || state.imm_memtables.len() >= self.options.num_memtable_limit
+        };
+
+        if need_freeze {
+            // Acquire the state lock to freeze the memtable
+            let lock = self.state_lock.lock();
+
+            // Check again after acquiring the lock to avoid race conditions
+            let need_freeze_after_lock = {
+                let state = self.state.read();
+                state.memtable.approximate_size() >= self.options.target_sst_size
+                    || state.imm_memtables.len() >= self.options.num_memtable_limit
+            };
+
+            if need_freeze_after_lock {
+                // Force freeze the memtable
+                self.force_freeze_memtable(&lock)?;
+            }
+        }
+
+        // Now put the key-value pair into the current memtable
+        let state = self.state.read();
+        state.memtable.put(key, value)?;
+
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        // A delete is just a put with an empty value (tombstone)
+        self.put(key, &[])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -333,8 +389,31 @@ impl LsmStorageInner {
     }
 
     /// Force freeze the current memtable to an immutable memtable
-    pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+    pub fn force_freeze_memtable(&self, state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
+        // Read the current state
+        let current_state = self.state.read().clone();
+
+        // Create a new memtable
+        let new_memtable = Arc::new(MemTable::create(current_state.memtable.id() + 1));
+
+        // Create the new state (acquire write lock) by:
+        // 1. Adding the current memtable to the front of immutable memtables
+        // 2. Setting the new memtable as the current one
+        let mut imm_memtables = current_state.imm_memtables.clone();
+        imm_memtables.insert(0, current_state.memtable.clone());
+
+        let new_state = Arc::new(LsmStorageState {
+            memtable: new_memtable,
+            imm_memtables,
+            l0_sstables: current_state.l0_sstables.clone(),
+            levels: current_state.levels.clone(),
+            sstables: current_state.sstables.clone(),
+        });
+
+        // Update the state with the new state
+        *self.state.write() = new_state;
+
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
